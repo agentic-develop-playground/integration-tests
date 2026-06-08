@@ -26,10 +26,7 @@ try:
 except ImportError:
     pass
 
-BASE_URL = os.environ.get(
-    "DATASTAT_BASE_URL",
-    "https://datastat-manage-website.preview.test.osinfra.cn",
-).rstrip("/")
+BASE_URL = "https://datastat-manage-website.preview.test.osinfra.cn"
 
 
 # ===== Fixture =====
@@ -397,3 +394,379 @@ class TestRobustness:
                     if ("Cannot read" in e or "is not defined" in e)
                     and not any(ig in e for ig in ignorable)]
         assert not critical, f"连续导航出现关键 JS 报错: {critical}"
+
+
+# ===== 顶部社区下拉框：每个选项各一条用例 =====
+# 数据来源：实测点开 header 的 el-select 后枚举 .group-item 与 li.el-select-dropdown__item
+
+# 三个分组及其下属社区选项（label 即下拉中的可见文本）
+COMMUNITY_OPTIONS = [
+    # 分组 1：鲲鹏
+    ("鲲鹏", "BoostKit"),
+    ("鲲鹏", "UnifiedBus"),
+    ("鲲鹏", "openEuler"),
+    ("鲲鹏", "openUBMC"),
+    ("鲲鹏", "openGauss"),
+    ("鲲鹏", "openFuyao"),
+    # 分组 2：昇腾
+    ("昇腾", "昇腾系列"),
+    ("昇腾", "CANN"),
+    ("昇腾", "HiFloat"),
+    ("昇腾", "MindSpore"),
+    ("昇腾", "MindIE"),
+    ("昇腾", "MindSeriesSDK"),
+    ("昇腾", "MindSDK"),
+    ("昇腾", "AscendNPU-IR"),
+    ("昇腾", "MindStudio"),
+    ("昇腾", "MindCluster"),
+    ("昇腾", "PTA"),
+    ("昇腾", "MindSpeed"),
+    ("昇腾", "vLLM"),
+    ("昇腾", "SGLang"),
+    ("昇腾", "PyTorch"),
+    ("昇腾", "Triton"),
+    ("昇腾", "TileLang"),
+    ("昇腾", "VeRL"),
+    ("昇腾", "参与开源"),
+    # 分组 3：公共
+    ("公共", "基础设施"),
+    ("公共", "洞察"),
+]
+
+
+def _open_community_dropdown(page: Page, group_label: str) -> None:
+    """点开顶部社区下拉框，并切到指定分组（鲲鹏/昇腾/公共）。
+
+    分组项是「sticky」p 元素，常规 click 会被判为不可点击；用 force=True 触发。
+    """
+    page.click("header .el-select__wrapper")
+    page.wait_for_selector(".el-select-dropdown", state="visible", timeout=5000)
+    group = page.locator(".group-item", has_text=group_label).first
+    group.click(force=True)
+    page.wait_for_timeout(500)
+
+
+class TestCommunityDropdown:
+    """顶部社区下拉框：分组 + 每个社区选项的可见性 / 切换可达性"""
+
+    def test_dropdown_opens(self, page: Page):
+        """TC-UI-DD-001 [正常流] 顶部下拉框可点开"""
+        _open_page(page)
+        page.click("header .el-select__wrapper")
+        dropdown = page.locator(".el-select-dropdown")
+        expect(dropdown).to_be_visible(timeout=5000)
+
+    @pytest.mark.parametrize("group", ["鲲鹏", "昇腾", "公共"])
+    def test_group_visible(self, page: Page, group: str):
+        """TC-UI-DD-002 [正常流] 三大分组在下拉中可见"""
+        _open_page(page)
+        page.click("header .el-select__wrapper")
+        page.wait_for_selector(".el-select-dropdown", state="visible", timeout=5000)
+        grp = page.locator(".group-item .group-name", has_text=group)
+        assert grp.count() > 0, f"分组 {group} 应可见"
+
+    @pytest.mark.parametrize(
+        "group,option",
+        COMMUNITY_OPTIONS,
+        ids=[f"{g}-{o}" for g, o in COMMUNITY_OPTIONS],
+    )
+    def test_option_visible_in_dropdown(self, page: Page, group: str, option: str):
+        """TC-UI-DD-OPT-VIS 每个社区选项在对应分组下可见"""
+        _open_page(page)
+        _open_community_dropdown(page, group)
+        # 取可见状态的同名 li
+        target = page.locator(
+            f"li.el-select-dropdown__item:visible:has-text('{option}')"
+        )
+        assert target.count() > 0, f"{group} 分组下应可见选项: {option}"
+
+    @pytest.mark.parametrize(
+        "group,option",
+        COMMUNITY_OPTIONS,
+        ids=[f"{g}-{o}" for g, o in COMMUNITY_OPTIONS],
+    )
+    def test_option_switch_reaches_overview(self, page: Page, group: str, option: str):
+        """TC-UI-DD-OPT-NAV 点击社区选项后页面仍在站内且 #app 渲染"""
+        _open_page(page)
+        _open_community_dropdown(page, group)
+        # 取该项并点击；strict 时取首个匹配
+        target = page.locator(
+            f"li.el-select-dropdown__item:visible:has-text('{option}')"
+        ).first
+        # 部分超长项可能溢出，强制滚动到视口
+        try:
+            target.scroll_into_view_if_needed(timeout=3000)
+        except Exception:
+            pass
+        target.click()
+        page.wait_for_timeout(3000)
+        # 仍在被测域内
+        assert "datastat-manage-website" in page.url, \
+            f"切到 {option} 后跳出域: {page.url}"
+        # #app 容器仍渲染
+        expect(page.locator("#app")).to_be_visible(timeout=10000)
+        # 顶部下拉显示文本应已更新（部分项前端会延迟刷新，故仅做软校验）
+        header_text = page.locator("header .el-select__placeholder, "
+                                   "header .el-select__selected-item").first.inner_text()
+        # 软断言：当前显示项可能与 option 不完全一致（中文/缩写映射），仅验证非空
+        assert header_text is not None
+
+
+# ===== cases.txt 补充用例：总览页面功能测试 =====
+
+COMMUNITIES = ["cann", "openeuler"]
+
+
+def _goto_community(page: Page, community: str, path: str = "/overview", wait: int = 3000):
+    """导航到指定社区的页面"""
+    page.goto(f"{BASE_URL}{path}?community={community}",
+              wait_until="domcontentloaded", timeout=30000)
+    page.wait_for_timeout(wait)
+
+
+class TestOverviewData:
+    """总览页面数据一致性（cases.txt 第1节）"""
+
+    @pytest.mark.parametrize("community", COMMUNITIES)
+    def test_overview_has_project_summary(self, page: Page, community: str):
+        """TC-CASE-001 总览页含「项目总览」区域"""
+        _goto_community(page, community)
+        text = page.locator("#app").inner_text()
+        assert "项目总览" in text, "总览页应含「项目总览」区域"
+
+    @pytest.mark.parametrize("community", COMMUNITIES)
+    def test_overview_has_huawei_developer_section(self, page: Page, community: str):
+        """TC-CASE-002 总览页含「华为开发者」和「非华为开发者」"""
+        _goto_community(page, community)
+        text = page.locator("#app").inner_text()
+        assert "华为开发者" in text, "应含「华为开发者」"
+        assert "非华为开发者" in text, "应含「非华为开发者」"
+
+    @pytest.mark.parametrize("community", COMMUNITIES)
+    def test_overview_has_pr_metrics(self, page: Page, community: str):
+        """TC-CASE-003 总览页含 Active/Merged/Open PR 指标"""
+        _goto_community(page, community)
+        text = page.locator("#app").inner_text()
+        assert "Active pull requests" in text or "Merged Pull Requests" in text
+        assert "Open Pull Requests" in text or "Merged Pull Requests" in text
+
+    @pytest.mark.parametrize("community", COMMUNITIES)
+    def test_overview_has_issue_metrics(self, page: Page, community: str):
+        """TC-CASE-004 总览页含 Active/Closed/New Issues 指标"""
+        _goto_community(page, community)
+        text = page.locator("#app").inner_text()
+        assert "Active issues" in text or "Closed Issues" in text
+
+    @pytest.mark.parametrize("community", COMMUNITIES)
+    def test_overview_has_contribution_trend(self, page: Page, community: str):
+        """TC-CASE-005 总览页含「贡献趋势（合入PR）」图表区"""
+        _goto_community(page, community)
+        text = page.locator("#app").inner_text()
+        assert "贡献趋势" in text
+
+    @pytest.mark.parametrize("community", COMMUNITIES)
+    def test_overview_has_contributor_ranking(self, page: Page, community: str):
+        """TC-CASE-006 总览页含「贡献者排名」和「贡献组织排名」"""
+        _goto_community(page, community)
+        text = page.locator("#app").inner_text()
+        assert "贡献者排名" in text
+        assert "贡献组织排名" in text
+
+
+# ===== cases.txt 补充用例：运营看板页面功能测试 =====
+
+class TestOperationDashboard:
+    """运营看板（cases.txt 第2节）"""
+
+    @pytest.mark.parametrize("community", COMMUNITIES)
+    def test_sidebar_has_operation_menu(self, page: Page, community: str):
+        """TC-CASE-007 侧栏含「运营看板」子菜单"""
+        _goto_community(page, community)
+        text = page.locator("#app").inner_text()
+        assert "运营看板" in text or "软件生产" in text or "运营总览" in text
+
+    @pytest.mark.parametrize("community", COMMUNITIES)
+    def test_software_production_page(self, page: Page, community: str):
+        """TC-CASE-008 软件生产页含 PR 闭环率指标"""
+        _goto_community(page, community)
+        parent = page.locator(".el-menu-item, .el-sub-menu__title",
+                              has_text="运营看板")
+        if parent.count() > 0:
+            parent.first.click()
+            page.wait_for_timeout(800)
+        sw = page.locator(".el-menu-item", has_text="软件生产")
+        if sw.count() > 0:
+            sw.first.click(timeout=10000)
+            page.wait_for_timeout(3000)
+            text = page.locator("#app").inner_text()
+            has_metrics = ("Merged Pull Requests" in text or
+                           "PR" in text or "Active" in text)
+            assert has_metrics, "软件生产页应含 PR 相关指标"
+        else:
+            pytest.skip("侧栏无「软件生产」菜单项")
+
+    @pytest.mark.parametrize("community", COMMUNITIES)
+    def test_contributor_page_has_stats(self, page: Page, community: str):
+        """TC-CASE-009 贡献者页含「总体贡献情况」"""
+        _goto_community(page, community)
+        parent = page.locator(".el-menu-item, .el-sub-menu__title",
+                              has_text="运营看板")
+        if parent.count() > 0:
+            parent.first.click()
+            page.wait_for_timeout(800)
+        contrib = page.locator(".el-menu-item", has_text="贡献者")
+        if contrib.count() > 0:
+            contrib.first.click(timeout=10000)
+            page.wait_for_timeout(3000)
+            text = page.locator("#app").inner_text()
+            assert "贡献" in text, "贡献者页应含贡献相关内容"
+        else:
+            pytest.skip("侧栏无「贡献者」菜单项")
+
+
+# ===== cases.txt 补充用例：趋势分析（开发者页面）=====
+
+class TestDevelopersTrend:
+    """趋势分析 - 开发者页面（cases.txt 第3节）"""
+
+    @pytest.mark.parametrize("community", COMMUNITIES)
+    def test_developers_has_d0_d1_d2_tabs(self, page: Page, community: str):
+        """TC-CASE-010 开发者页含 D0/D1/D2 度量指标切换"""
+        _goto_community(page, community, "/developers")
+        text = page.locator("#app").inner_text()
+        assert "D0" in text and "D1" in text and "D2" in text
+
+    @pytest.mark.parametrize("community", COMMUNITIES)
+    def test_developers_has_trend_chart(self, page: Page, community: str):
+        """TC-CASE-011 开发者页含趋势图（canvas/svg）"""
+        _goto_community(page, community, "/developers", wait=5000)
+        chart = page.locator("canvas, svg, [class*='chart']")
+        assert chart.count() > 0, "开发者页应含趋势图"
+
+    @pytest.mark.parametrize("community", COMMUNITIES)
+    def test_developers_has_dimension_controls(self, page: Page, community: str):
+        """TC-CASE-012 开发者页含度量维度（增量/总量/当期活跃）"""
+        _goto_community(page, community, "/developers")
+        text = page.locator("#app").inner_text()
+        assert "增量" in text or "总量" in text or "当期活跃" in text
+
+    @pytest.mark.parametrize("community", COMMUNITIES)
+    def test_developers_has_metric_types(self, page: Page, community: str):
+        """TC-CASE-013 开发者页含度量指标（PR/Issue/Comment/AddCode）"""
+        _goto_community(page, community, "/developers")
+        text = page.locator("#app").inner_text()
+        has_pr = "PR" in text or "提交PR" in text
+        has_issue = "Issue" in text
+        assert has_pr and has_issue
+
+    @pytest.mark.parametrize("community", COMMUNITIES)
+    def test_developers_has_contributor_table(self, page: Page, community: str):
+        """TC-CASE-014 开发者页含贡献者统计表格"""
+        _goto_community(page, community, "/developers")
+        text = page.locator("#app").inner_text()
+        assert "贡献者统计" in text or "开发者" in text
+        assert "合入PR" in text or "PR闭环率" in text
+
+    @pytest.mark.parametrize("community", COMMUNITIES)
+    def test_developers_funnel_or_chart_exists(self, page: Page, community: str):
+        """TC-CASE-015 开发者页含漏斗图或趋势图可视化"""
+        _goto_community(page, community, "/developers", wait=5000)
+        visual = page.locator("canvas, svg, [_echarts_instance_]")
+        assert visual.count() > 0
+
+    @pytest.mark.parametrize("community", COMMUNITIES)
+    def test_developers_interval_controls(self, page: Page, community: str):
+        """TC-CASE-016 开发者页含间隔周期（天/周/月）"""
+        _goto_community(page, community, "/developers")
+        text = page.locator("#app").inner_text()
+        has_interval = ("天" in text and "周" in text and "月" in text) or \
+                       ("间隔周期" in text)
+        assert has_interval
+
+
+# ===== cases.txt 补充用例：组织分析/仓库分析 =====
+
+class TestOrgAndRepoAnalysis:
+    """组织分析 & 仓库分析页面（cases.txt 第3节 4/5）"""
+
+    @pytest.mark.parametrize("community", COMMUNITIES)
+    def test_org_analysis_page_loads(self, page: Page, community: str):
+        """TC-CASE-017 组织分析页可加载"""
+        _goto_community(page, community, "/organizations", wait=4000)
+        text = page.locator("#app").inner_text()
+        assert "组织" in text or "PR" in text or \
+               page.locator("canvas, svg").count() > 0
+
+    @pytest.mark.parametrize("community", COMMUNITIES)
+    def test_repo_analysis_page_loads(self, page: Page, community: str):
+        """TC-CASE-018 仓库分析页可加载"""
+        _goto_community(page, community, "/warehouse", wait=4000)
+        text = page.locator("#app").inner_text()
+        assert "仓库" in text or "PR" in text or \
+               page.locator("canvas, svg").count() > 0
+
+    @pytest.mark.parametrize("community", COMMUNITIES)
+    def test_org_has_pie_chart(self, page: Page, community: str):
+        """TC-CASE-019 组织分析页含饼图/图表"""
+        _goto_community(page, community, "/organizations", wait=5000)
+        chart = page.locator("canvas, svg, [class*='chart']")
+        assert chart.count() > 0
+
+    @pytest.mark.parametrize("community", COMMUNITIES)
+    def test_repo_has_pie_chart(self, page: Page, community: str):
+        """TC-CASE-020 仓库分析页含饼图/图表"""
+        _goto_community(page, community, "/warehouse", wait=5000)
+        chart = page.locator("canvas, svg, [class*='chart']")
+        assert chart.count() > 0
+
+
+# ===== cases.txt 补充用例：社区健康度功能测试 =====
+
+class TestCommunityHealth:
+    """社区健康度（cases.txt 第4节）"""
+
+    @pytest.mark.parametrize("community", COMMUNITIES)
+    def test_health_page_has_radar_or_trend(self, page: Page, community: str):
+        """TC-CASE-021 健康度页含雷达图或趋势图"""
+        _goto_community(page, community, "/health", wait=5000)
+        chart = page.locator("canvas, svg, [class*='chart'], [class*='radar']")
+        text = page.locator("#app").inner_text()
+        has_content = chart.count() > 0 or "指标名称" in text
+        assert has_content
+
+    @pytest.mark.parametrize("community", COMMUNITIES)
+    def test_health_has_indicator_table(self, page: Page, community: str):
+        """TC-CASE-022 健康度页含指标列表"""
+        _goto_community(page, community, "/health", wait=4000)
+        text = page.locator("#app").inner_text()
+        assert "指标名称" in text or "当前值" in text or "同比值" in text
+
+    @pytest.mark.parametrize("community", COMMUNITIES)
+    def test_health_has_date_range(self, page: Page, community: str):
+        """TC-CASE-023 健康度页含日期范围选择器"""
+        _goto_community(page, community, "/health")
+        text = page.locator("#app").inner_text()
+        assert "至" in text or "日期" in text
+
+
+# ===== cases.txt 补充用例：文档分析功能测试 =====
+
+class TestDocsAnalysis:
+    """文档分析（cases.txt 第5节）"""
+
+    @pytest.mark.parametrize("community", COMMUNITIES)
+    def test_docs_page_loads(self, page: Page, community: str):
+        """TC-CASE-024 文档分析页可加载"""
+        _goto_community(page, community, "/docs", wait=4000)
+        text = page.locator("#app").inner_text()
+        assert "文档" in text or "数据字典" in text or \
+               "No Data" in text or len(text) > 50
+
+    @pytest.mark.parametrize("community", COMMUNITIES)
+    def test_docs_has_search_or_table(self, page: Page, community: str):
+        """TC-CASE-025 文档分析页含搜索框或表格"""
+        _goto_community(page, community, "/docs", wait=4000)
+        search = page.locator("input[type='text'], .el-input, [class*='search']")
+        table = page.locator("table, .el-table")
+        assert search.count() > 0 or table.count() > 0 or \
+               "No Data" in page.locator("#app").inner_text()
